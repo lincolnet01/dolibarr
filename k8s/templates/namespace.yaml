@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __CUSTOMER_NAMESPACE__
+  labels:
+    app: dolibarr
+    customer: __CUSTOMER_NAME__
+    managed-by: github-actions

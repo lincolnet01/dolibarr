@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dolibarr-ingress
+  namespace: __CUSTOMER_NAMESPACE__
+  labels:
+    app: dolibarr
+    customer: __CUSTOMER_NAME__
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: __CUSTOMER_DOMAIN__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dolibarr
+                port:
+                  number: 80

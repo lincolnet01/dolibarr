@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dolibarr
+  namespace: __CUSTOMER_NAMESPACE__
+  labels:
+    app: dolibarr
+    customer: __CUSTOMER_NAME__
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+  selector:
+    app: dolibarr

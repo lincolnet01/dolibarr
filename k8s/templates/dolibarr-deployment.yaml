@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dolibarr
+  namespace: __CUSTOMER_NAMESPACE__
+  labels:
+    app: dolibarr
+    customer: __CUSTOMER_NAME__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dolibarr
+  template:
+    metadata:
+      labels:
+        app: dolibarr
+        customer: __CUSTOMER_NAME__
+    spec:
+      containers:
+        - name: dolibarr
+          image: tuxgasy/dolibarr:__DOLIBARR_VERSION__
+          ports:
+            - containerPort: 80
+          envFrom:
+            - configMapRef:
+                name: dolibarr-config
+          env:
+            - name: DOLI_DB_HOST_PORT
+              value: "3306"
+            - name: DOLI_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dolibarr-secrets
+                  key: MYSQL_PASSWORD
+            - name: DOLI_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dolibarr-secrets
+                  key: DOLI_ADMIN_PASSWORD
+            - name: DOLI_INIT_DEMO
+              value: "0"
+          volumeMounts:
+            - name: dolibarr-documents
+              mountPath: /var/www/documents
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: dolibarr-documents
+          persistentVolumeClaim:
+            claimName: dolibarr-documents

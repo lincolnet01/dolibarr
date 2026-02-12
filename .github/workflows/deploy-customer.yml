@@ -1,0 +1,176 @@
+name: Deploy/Destroy Customer Dolibarr Instance
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_name:
+        description: "Customer name (lowercase alphanumeric + hyphens, 3-20 chars)"
+        required: true
+        type: string
+      dolibarr_version:
+        description: "Dolibarr image tag (tuxgasy/dolibarr)"
+        required: false
+        default: "19"
+        type: string
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
+
+env:
+  NAMESPACE: dolibarr-${{ github.event.inputs.customer_name }}
+  DOMAIN: ${{ github.event.inputs.customer_name }}.moyocorps.com
+
+jobs:
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate customer_name
+        run: |
+          NAME="${{ github.event.inputs.customer_name }}"
+          if [[ ! "$NAME" =~ ^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$ ]]; then
+            echo "::error::customer_name must be 3-20 chars, lowercase alphanumeric + hyphens, cannot start/end with hyphen"
+            exit 1
+          fi
+          echo "Customer: $NAME"
+          echo "Namespace: dolibarr-$NAME"
+          echo "Domain: $NAME.moyocorps.com"
+
+  deploy:
+    name: Deploy Customer Instance
+    needs: validate
+    if: github.event.inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Verify cluster connectivity
+        run: kubectl cluster-info
+
+      - name: Render templates
+        run: |
+          mkdir -p k8s/rendered
+          for file in k8s/templates/*.yaml; do
+            sed \
+              -e "s|__CUSTOMER_NAME__|${{ github.event.inputs.customer_name }}|g" \
+              -e "s|__CUSTOMER_NAMESPACE__|${{ env.NAMESPACE }}|g" \
+              -e "s|__CUSTOMER_DOMAIN__|${{ env.DOMAIN }}|g" \
+              -e "s|__DOLIBARR_VERSION__|${{ github.event.inputs.dolibarr_version }}|g" \
+              "$file" > "k8s/rendered/$(basename $file)"
+          done
+          echo "--- Rendered templates ---"
+          ls -la k8s/rendered/
+
+      - name: Create namespace
+        run: kubectl apply -f k8s/rendered/namespace.yaml
+
+      - name: Create secrets (if not exists)
+        run: |
+          if kubectl get secret dolibarr-secrets -n ${{ env.NAMESPACE }} >/dev/null 2>&1; then
+            echo "Secrets already exist — skipping (passwords preserved)"
+          else
+            MYSQL_ROOT_PASSWORD=$(openssl rand -base64 24)
+            MYSQL_PASSWORD=$(openssl rand -base64 24)
+            DOLI_ADMIN_PASSWORD=$(openssl rand -base64 16)
+
+            kubectl create secret generic dolibarr-secrets \
+              -n ${{ env.NAMESPACE }} \
+              --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
+              --from-literal=MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+              --from-literal=DOLI_ADMIN_PASSWORD="$DOLI_ADMIN_PASSWORD"
+
+            echo "Secrets created with auto-generated passwords"
+          fi
+
+      - name: Apply ConfigMap
+        run: kubectl apply -f k8s/rendered/configmap.yaml
+
+      - name: Deploy MariaDB
+        run: |
+          kubectl apply -f k8s/rendered/mariadb-pvc.yaml
+          kubectl apply -f k8s/rendered/mariadb-deployment.yaml
+          kubectl apply -f k8s/rendered/mariadb-service.yaml
+          echo "Waiting for MariaDB rollout..."
+          kubectl rollout status deployment/mariadb -n ${{ env.NAMESPACE }} --timeout=120s
+
+      - name: Deploy Dolibarr
+        run: |
+          kubectl apply -f k8s/rendered/dolibarr-pvc.yaml
+          kubectl apply -f k8s/rendered/dolibarr-deployment.yaml
+          kubectl apply -f k8s/rendered/dolibarr-service.yaml
+          echo "Waiting for Dolibarr rollout (up to 300s for first-time auto-install)..."
+          kubectl rollout status deployment/dolibarr -n ${{ env.NAMESPACE }} --timeout=300s
+
+      - name: Apply Ingress
+        run: kubectl apply -f k8s/rendered/ingress.yaml
+
+      - name: Deployment summary
+        run: |
+          echo "============================================"
+          echo "  DEPLOYMENT COMPLETE"
+          echo "============================================"
+          echo ""
+          echo "  Customer:  ${{ github.event.inputs.customer_name }}"
+          echo "  Namespace: ${{ env.NAMESPACE }}"
+          echo "  URL:       https://${{ env.DOMAIN }}"
+          echo "  Version:   tuxgasy/dolibarr:${{ github.event.inputs.dolibarr_version }}"
+          echo ""
+          echo "  Admin user: admin"
+          echo "  Get admin password:"
+          echo "    kubectl get secret dolibarr-secrets -n ${{ env.NAMESPACE }} -o jsonpath='{.data.DOLI_ADMIN_PASSWORD}' | base64 -d"
+          echo ""
+          echo "============================================"
+          echo ""
+          kubectl get all -n ${{ env.NAMESPACE }}
+
+  destroy:
+    name: Destroy Customer Instance
+    needs: validate
+    if: github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Verify namespace exists
+        run: |
+          if ! kubectl get namespace ${{ env.NAMESPACE }} >/dev/null 2>&1; then
+            echo "::error::Namespace ${{ env.NAMESPACE }} does not exist — nothing to destroy"
+            exit 1
+          fi
+          echo "Namespace ${{ env.NAMESPACE }} found — proceeding with deletion"
+
+      - name: Delete namespace (cascades all resources)
+        run: |
+          echo "Deleting namespace ${{ env.NAMESPACE }} and ALL resources within it..."
+          kubectl delete namespace ${{ env.NAMESPACE }} --wait=true --timeout=120s
+          echo ""
+          echo "============================================"
+          echo "  DESTROY COMPLETE"
+          echo "============================================"
+          echo ""
+          echo "  Customer:  ${{ github.event.inputs.customer_name }}"
+          echo "  Namespace: ${{ env.NAMESPACE }} (deleted)"
+          echo "  All resources including PVCs/data have been removed."
+          echo ""
+          echo "============================================"
