@@ -23,6 +23,8 @@ on:
 env:
   NAMESPACE: dolibarr-${{ github.event.inputs.customer_name }}
   DOMAIN: ${{ github.event.inputs.customer_name }}.moyocorps.com
+  VPS_HOST: 185.192.96.209
+  VPS_USER: prime
 
 jobs:
   validate:
@@ -49,17 +51,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig
+      - name: Set up SSH
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Verify cluster connectivity
-        run: kubectl cluster-info
+      - name: Verify SSH connectivity
+        run: ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl cluster-info"
 
       - name: Render templates
         run: |
@@ -75,12 +75,22 @@ jobs:
           echo "--- Rendered templates ---"
           ls -la k8s/rendered/
 
+      - name: Copy rendered templates to VPS
+        run: |
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p $REMOTE_DIR"
+          scp k8s/rendered/*.yaml ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:$REMOTE_DIR/
+
       - name: Create namespace
-        run: kubectl apply -f k8s/rendered/namespace.yaml
+        run: |
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/namespace.yaml"
 
       - name: Create secrets (if not exists)
         run: |
-          if kubectl get secret dolibarr-secrets -n ${{ env.NAMESPACE }} >/dev/null 2>&1; then
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<'SCRIPT'
+          NAMESPACE="${{ env.NAMESPACE }}"
+          if kubectl get secret dolibarr-secrets -n "$NAMESPACE" >/dev/null 2>&1; then
             echo "Secrets already exist — skipping (passwords preserved)"
           else
             MYSQL_ROOT_PASSWORD=$(openssl rand -base64 24)
@@ -88,35 +98,52 @@ jobs:
             DOLI_ADMIN_PASSWORD=$(openssl rand -base64 16)
 
             kubectl create secret generic dolibarr-secrets \
-              -n ${{ env.NAMESPACE }} \
+              -n "$NAMESPACE" \
               --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
               --from-literal=MYSQL_PASSWORD="$MYSQL_PASSWORD" \
               --from-literal=DOLI_ADMIN_PASSWORD="$DOLI_ADMIN_PASSWORD"
 
             echo "Secrets created with auto-generated passwords"
           fi
+          SCRIPT
 
       - name: Apply ConfigMap
-        run: kubectl apply -f k8s/rendered/configmap.yaml
+        run: |
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/configmap.yaml"
 
       - name: Deploy MariaDB
         run: |
-          kubectl apply -f k8s/rendered/mariadb-pvc.yaml
-          kubectl apply -f k8s/rendered/mariadb-deployment.yaml
-          kubectl apply -f k8s/rendered/mariadb-service.yaml
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
+          kubectl apply -f $REMOTE_DIR/mariadb-pvc.yaml
+          kubectl apply -f $REMOTE_DIR/mariadb-deployment.yaml
+          kubectl apply -f $REMOTE_DIR/mariadb-service.yaml
           echo "Waiting for MariaDB rollout..."
           kubectl rollout status deployment/mariadb -n ${{ env.NAMESPACE }} --timeout=120s
+          SCRIPT
 
       - name: Deploy Dolibarr
         run: |
-          kubectl apply -f k8s/rendered/dolibarr-pvc.yaml
-          kubectl apply -f k8s/rendered/dolibarr-deployment.yaml
-          kubectl apply -f k8s/rendered/dolibarr-service.yaml
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
+          kubectl apply -f $REMOTE_DIR/dolibarr-pvc.yaml
+          kubectl apply -f $REMOTE_DIR/dolibarr-deployment.yaml
+          kubectl apply -f $REMOTE_DIR/dolibarr-service.yaml
           echo "Waiting for Dolibarr rollout (up to 300s for first-time auto-install)..."
           kubectl rollout status deployment/dolibarr -n ${{ env.NAMESPACE }} --timeout=300s
+          SCRIPT
 
       - name: Apply Ingress
-        run: kubectl apply -f k8s/rendered/ingress.yaml
+        run: |
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/ingress.yaml"
+
+      - name: Clean up temp files on VPS
+        if: always()
+        run: |
+          REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "rm -rf $REMOTE_DIR" || true
 
       - name: Deployment summary
         run: |
@@ -131,11 +158,11 @@ jobs:
           echo ""
           echo "  Admin user: admin"
           echo "  Get admin password:"
-          echo "    kubectl get secret dolibarr-secrets -n ${{ env.NAMESPACE }} -o jsonpath='{.data.DOLI_ADMIN_PASSWORD}' | base64 -d"
+          echo "    ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} \"kubectl get secret dolibarr-secrets -n ${{ env.NAMESPACE }} -o jsonpath='{.data.DOLI_ADMIN_PASSWORD}' | base64 -d\""
           echo ""
           echo "============================================"
           echo ""
-          kubectl get all -n ${{ env.NAMESPACE }}
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get all -n ${{ env.NAMESPACE }}"
 
   destroy:
     name: Destroy Customer Instance
@@ -143,18 +170,16 @@ jobs:
     if: github.event.inputs.action == 'destroy'
     runs-on: ubuntu-latest
     steps:
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig
+      - name: Set up SSH
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Verify namespace exists
         run: |
-          if ! kubectl get namespace ${{ env.NAMESPACE }} >/dev/null 2>&1; then
+          if ! ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get namespace ${{ env.NAMESPACE }}" >/dev/null 2>&1; then
             echo "::error::Namespace ${{ env.NAMESPACE }} does not exist — nothing to destroy"
             exit 1
           fi
@@ -163,7 +188,7 @@ jobs:
       - name: Delete namespace (cascades all resources)
         run: |
           echo "Deleting namespace ${{ env.NAMESPACE }} and ALL resources within it..."
-          kubectl delete namespace ${{ env.NAMESPACE }} --wait=true --timeout=120s
+          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl delete namespace ${{ env.NAMESPACE }} --wait=true --timeout=120s"
           echo ""
           echo "============================================"
           echo "  DESTROY COMPLETE"
