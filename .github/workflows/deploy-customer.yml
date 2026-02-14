@@ -25,6 +25,8 @@ env:
   DOMAIN: ${{ github.event.inputs.customer_name }}.moyocorps.com
   VPS_HOST: 185.192.96.209
   VPS_USER: prime
+  VPS_PORT: 1249
+  SSH_OPTS: -p 1249 -o StrictHostKeyChecking=no
 
 jobs:
   validate:
@@ -56,10 +58,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -p ${{ env.VPS_PORT }} -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Verify SSH connectivity
-        run: ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl cluster-info"
+        run: ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl cluster-info"
 
       - name: Render templates
         run: |
@@ -78,17 +80,17 @@ jobs:
       - name: Copy rendered templates to VPS
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p $REMOTE_DIR"
-          scp k8s/rendered/*.yaml ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:$REMOTE_DIR/
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "mkdir -p $REMOTE_DIR"
+          scp -P ${{ env.VPS_PORT }} -o StrictHostKeyChecking=no k8s/rendered/*.yaml ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:$REMOTE_DIR/
 
       - name: Create namespace
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/namespace.yaml"
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/namespace.yaml"
 
       - name: Create secrets (if not exists)
         run: |
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<'SCRIPT'
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<'SCRIPT'
           NAMESPACE="${{ env.NAMESPACE }}"
           if kubectl get secret dolibarr-secrets -n "$NAMESPACE" >/dev/null 2>&1; then
             echo "Secrets already exist — skipping (passwords preserved)"
@@ -110,12 +112,12 @@ jobs:
       - name: Apply ConfigMap
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/configmap.yaml"
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/configmap.yaml"
 
       - name: Deploy MariaDB
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
           kubectl apply -f $REMOTE_DIR/mariadb-pvc.yaml
           kubectl apply -f $REMOTE_DIR/mariadb-deployment.yaml
           kubectl apply -f $REMOTE_DIR/mariadb-service.yaml
@@ -126,7 +128,7 @@ jobs:
       - name: Deploy Dolibarr
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} bash <<SCRIPT
           kubectl apply -f $REMOTE_DIR/dolibarr-pvc.yaml
           kubectl apply -f $REMOTE_DIR/dolibarr-deployment.yaml
           kubectl apply -f $REMOTE_DIR/dolibarr-service.yaml
@@ -137,13 +139,13 @@ jobs:
       - name: Apply Ingress
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/ingress.yaml"
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl apply -f $REMOTE_DIR/ingress.yaml"
 
       - name: Clean up temp files on VPS
         if: always()
         run: |
           REMOTE_DIR="/tmp/dolibarr-deploy-${{ github.event.inputs.customer_name }}"
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "rm -rf $REMOTE_DIR" || true
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "rm -rf $REMOTE_DIR" || true
 
       - name: Deployment summary
         run: |
@@ -162,7 +164,7 @@ jobs:
           echo ""
           echo "============================================"
           echo ""
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get all -n ${{ env.NAMESPACE }}"
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get all -n ${{ env.NAMESPACE }}"
 
   destroy:
     name: Destroy Customer Instance
@@ -175,11 +177,11 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -p ${{ env.VPS_PORT }} -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Verify namespace exists
         run: |
-          if ! ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get namespace ${{ env.NAMESPACE }}" >/dev/null 2>&1; then
+          if ! ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl get namespace ${{ env.NAMESPACE }}" >/dev/null 2>&1; then
             echo "::error::Namespace ${{ env.NAMESPACE }} does not exist — nothing to destroy"
             exit 1
           fi
@@ -188,7 +190,7 @@ jobs:
       - name: Delete namespace (cascades all resources)
         run: |
           echo "Deleting namespace ${{ env.NAMESPACE }} and ALL resources within it..."
-          ssh ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl delete namespace ${{ env.NAMESPACE }} --wait=true --timeout=120s"
+          ssh ${{ env.SSH_OPTS }} ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "kubectl delete namespace ${{ env.NAMESPACE }} --wait=true --timeout=120s"
           echo ""
           echo "============================================"
           echo "  DESTROY COMPLETE"
